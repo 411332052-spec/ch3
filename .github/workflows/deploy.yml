@@ -25,11 +25,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-        # 階段二才需要：到 GitHub 專案設定 > Secrets and variables > Actions > Variables 新增
-        # VITE_SUPABASE_URL 與 VITE_SUPABASE_ANON_KEY（兩者都是公開值），再取消下面的註解。
-        # env:
-        #   VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-        #   VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        # 這兩個是 Actions Variables（GitHub 專案設定 > Secrets and variables > Actions > Variables），
+        # 都是公開值（專案網址與 anon key）。service_role key 絕不能放這裡。
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
