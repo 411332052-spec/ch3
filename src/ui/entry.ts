@@ -16,7 +16,6 @@ export function mountEntry(root: HTMLElement, { initialNickname, onSubmit }: Ent
     class: 'field',
     type: 'text',
     value: initialNickname,
-    maxlength: 12,
     autocomplete: 'off',
     autocapitalize: 'off',
     spellcheck: 'false',
@@ -41,7 +40,13 @@ export function mountEntry(root: HTMLElement, { initialNickname, onSubmit }: Ent
     );
   }
 
-  input.addEventListener('input', () => showError(''));
+  // 輸入的當下就提示，不要等到按「進入」才發現不行
+  input.addEventListener('input', () => {
+    const value = input.value;
+    if (/[^A-Za-z0-9]/.test(value)) showError('代號只能用英文和數字');
+    else if (value.length > 12) showError('代號最多 12 個字');
+    else showError('');
+  });
 
   const form = h(
     'form',
