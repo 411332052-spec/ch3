@@ -1,218 +1,230 @@
-// 聊天室畫面：頂部列、線上名單、訊息區、輸入區。
-import type { ChangeHint, ChatStore, Item } from '../chat/store';
+// 聊天室畫面：頂部列、側邊欄（聊天室／私訊／線上名單）、搜尋、訊息列表、輸入區。
+import type { ChangeHint, ChatStore } from '../chat/store';
 import type { Message } from '../chat/types';
-import { MAX_BODY, bodyLength } from '../chat/rules';
+import { createComposer } from './composer';
 import { h } from './dom';
+import { createEmojiPicker } from './emoji';
 import { icon } from './icons';
-import { createThemePicker } from './theme-picker';
+import { createMessageEl, updateMessageEl, type MessageEnv } from './message';
+import { createSettings } from './settings';
+import { createSidebar } from './sidebar';
 
 const NEAR_BOTTOM_PX = 80;
-const COUNTER_FROM = 100;
-const COMPOSER_MAX_HEIGHT = 140;
-
-// 只有 https 開頭、副檔名是常見圖片格式的網址，才會顯示成圖片
-const IMAGE_URL = /https:\/\/[^\s]+?\.(?:jpe?g|png|gif|webp)(?=\s|$)/gi;
-
-function parseBody(body: string): { text: string; urls: string[] } {
-  const urls = body.match(IMAGE_URL) ?? [];
-  const text = body.replace(IMAGE_URL, '').replace(/[ \t]+\n/g, '\n').trim();
-  return { text, urls };
-}
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('zh-TW', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-}
+const TOAST_MS = 3_500;
 
 export function mountChat(root: HTMLElement, store: ChatStore) {
-  const me = store.state.nickname;
+  const { state } = store;
   let keepBottom = true;
+  const elements = new Map<string, HTMLElement>();
 
-  // ---- 元素 ----
+  // ---- 頂部列 ----
+  const title = h('h1', { class: 'conv-title' });
+  const whoami = h('span', { class: 'whoami' }, '你的代號：', h('strong', {}, state.nickname));
+  const searchToggle = h(
+    'button',
+    { class: 'theme-toggle', type: 'button', 'aria-label': '搜尋訊息', 'aria-expanded': 'false' },
+    icon('search', 20),
+  );
+  const onlineLabel = h('span', { class: 'online-label' });
+  const unreadDot = h('span', { class: 'unread-dot', hidden: true, 'aria-label': '其他對話有未讀訊息' });
   const onlineButton = h(
     'button',
-    { class: 'online-btn', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'members' },
+    { class: 'online-btn', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'sidebar' },
     h('span', { class: 'dot' }),
-    h('span', { class: 'online-label' }),
+    onlineLabel,
     icon('chevronDown', 16, 'chev'),
+    unreadDot,
   );
-  const banner = h(
+  const banner = h('div', { class: 'banner', role: 'status', hidden: true }, icon('refresh', 16), '連線中斷，重新連線中…');
+
+  // ---- 搜尋 ----
+  const searchInput = h('input', {
+    class: 'search-input',
+    type: 'search',
+    placeholder: '搜尋目前對話的訊息',
+    'aria-label': '搜尋訊息',
+  });
+  const searchInfo = h('span', { class: 'search-info', 'aria-live': 'polite' });
+  const searchMore = h(
+    'button',
+    { class: 'link-btn', type: 'button', hidden: true, onClick: () => void store.loadOlder() },
+    '載入更早的訊息再找',
+  );
+  const searchbar = h(
     'div',
-    { class: 'banner', role: 'status', hidden: true },
-    icon('refresh', 16),
-    '連線中斷，重新連線中…',
+    { class: 'searchbar', hidden: true },
+    h('div', { class: 'search-row' }, searchInput, h('button', { class: 'icon-btn small', type: 'button', 'aria-label': '關閉搜尋', onClick: () => setSearchOpen(false) }, icon('close', 16))),
+    h('div', { class: 'search-row' }, searchInfo, searchMore),
   );
 
-  const membersCount = h('div', { class: 'members-title' });
-  const membersList = h('ul', { class: 'members-list' });
-  const members = h(
-    'aside',
-    { class: 'members', id: 'members', 'aria-label': '線上名單' },
-    membersCount,
-    membersList,
-  );
-  const backdrop = h('div', { class: 'backdrop' });
-
+  // ---- 訊息區 ----
   const topStatus = h('div', { class: 'top-status', role: 'status' });
   const list = h('div', { class: 'list' });
   const scroll = h('div', { class: 'scroll' }, topStatus, list);
-  const newMsgButton = h(
-    'button',
-    { class: 'new-msg', type: 'button', hidden: true },
-    '有新訊息',
-    icon('arrowDown', 16),
-  );
+  const newMsgButton = h('button', { class: 'new-msg', type: 'button', hidden: true }, '有新訊息', icon('arrowDown', 16));
+  const toastEl = h('div', { class: 'toast', role: 'status', hidden: true });
 
-  const textarea = h('textarea', {
-    class: 'composer-input',
-    rows: 1,
-    placeholder: '輸入訊息',
-    'aria-label': '輸入訊息',
-    enterkeyhint: 'enter',
-  });
-  const counter = h('span', { class: 'counter', hidden: true });
-  const sendButton = h('button', { class: 'send', type: 'submit', disabled: true }, '送出');
-  const composer = h(
-    'form',
-    { class: 'composer' },
-    h('div', { class: 'composer-row' }, textarea, sendButton),
-    counter,
+  // ---- Emoji 選擇器（輸入框和表情回應共用同一個）----
+  let pickerOwner: string | null = null;
+  let pickHandler: ((emoji: string) => void) | null = null;
+  const picker = h(
+    'div',
+    { class: 'picker-pop', hidden: true },
+    createEmojiPicker((emoji) => {
+      const handler = pickHandler;
+      closePicker();
+      handler?.(emoji);
+    }),
   );
+  function closePicker() {
+    picker.hidden = true;
+    pickerOwner = null;
+    pickHandler = null;
+  }
+  function togglePicker(owner: string, handler: (emoji: string) => void) {
+    if (!picker.hidden && pickerOwner === owner) return closePicker();
+    pickerOwner = owner;
+    pickHandler = handler;
+    picker.hidden = false;
+  }
+  document.addEventListener('click', (event) => {
+    if (!picker.hidden && !picker.contains(event.target as Node)) closePicker();
+  });
+
+  // ---- 輸入區與側邊欄 ----
+  const composer = createComposer(store, () => togglePicker('composer', (emoji) => composer.insertEmoji(emoji)));
+  const sidebar = createSidebar(store, () => setSidebarOpen(false));
 
   const main = h(
     'main',
     { class: 'main' },
-    h(
-      'header',
-      { class: 'topbar' },
-      h('h1', {}, '匿名聊天室'),
-      h(
-        'div',
-        { class: 'topbar-right' },
-        h('span', { class: 'whoami' }, '你的代號：', h('strong', {}, me)),
-        createThemePicker(),
-        onlineButton,
-      ),
-    ),
+    h('header', { class: 'topbar' }, title, h('div', { class: 'topbar-right' }, whoami, searchToggle, createSettings({ extended: true }), onlineButton)),
+    searchbar,
     banner,
     scroll,
     newMsgButton,
-    composer,
+    picker,
+    composer.el,
+    toastEl,
   );
-  const chat = h('div', { class: 'chat' }, members, main, backdrop);
+  const backdrop = h('div', { class: 'backdrop' });
+  const chat = h('div', { class: 'chat' }, sidebar.el, main, backdrop);
   root.replaceChildren(chat);
 
-  // ---- 線上名單 ----
-  function setMembersOpen(open: boolean) {
+  // ---- 訊息操作 ----
+  const env: MessageEnv = {
+    me: () => ({ nickname: state.nickname, userId: state.userId }),
+    imageUrl: (path) => store.imageUrl(path),
+    dmEnabled: () => state.features.dm,
+    actions: {
+      reply: (msg) => {
+        clearSelection();
+        composer.setReply(msg);
+      },
+      react: (msg, emoji) => void store.react(msg, emoji),
+      openPicker: (msg) => togglePicker(`msg:${msg.clientMsgId}`, (emoji) => void store.react(msg, emoji)),
+      edit: (msg) => {
+        clearSelection();
+        composer.startEdit(msg);
+      },
+      remove: (msg) => void store.remove(msg),
+      retry: (msg) => void store.retry(msg.clientMsgId),
+      openDm: (userId, nickname) => void store.openDm(userId, nickname),
+      jumpTo: (messageId) => jumpTo(messageId),
+      onImageLoad: () => {
+        if (keepBottom) scrollToBottom();
+      },
+    },
+  };
+
+  function jumpTo(messageId: number) {
+    const target: Message | undefined = store.findById(messageId);
+    const el = target ? elements.get(target.clientMsgId) : undefined;
+    if (!el || el.hidden) {
+      store.toast('找不到這則訊息，可能還沒載入，往上捲動可以載入更早的訊息');
+      return;
+    }
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1_500);
+  }
+
+  // ---- 點一下訊息：顯示操作列 ----
+  function clearSelection() {
+    list.querySelectorAll('.msg.selected').forEach((el) => el.classList.remove('selected'));
+  }
+  list.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('button, a, input')) return;
+    const msgEl = target.closest('.msg');
+    const wasSelected = msgEl?.classList.contains('selected') ?? false;
+    clearSelection();
+    if (msgEl && !wasSelected && (msgEl.querySelector('.actions')?.childElementCount ?? 0) > 0) {
+      msgEl.classList.add('selected');
+    }
+  });
+
+  // ---- 側邊欄（手機是浮層）----
+  function setSidebarOpen(open: boolean) {
     chat.classList.toggle('members-open', open);
     onlineButton.setAttribute('aria-expanded', String(open));
     onlineButton.querySelector('.chev')?.replaceWith(icon(open ? 'chevronUp' : 'chevronDown', 16, 'chev'));
   }
-  onlineButton.addEventListener('click', () => setMembersOpen(!chat.classList.contains('members-open')));
-  backdrop.addEventListener('click', () => setMembersOpen(false));
+  onlineButton.addEventListener('click', () => setSidebarOpen(!chat.classList.contains('members-open')));
+  backdrop.addEventListener('click', () => setSidebarOpen(false));
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') setMembersOpen(false);
+    if (event.key === 'Escape') {
+      setSidebarOpen(false);
+      closePicker();
+    }
   });
 
-  function renderMembers() {
-    const sorted = [...store.state.members].sort((a, b) => {
-      if (a.nickname === me) return -1;
-      if (b.nickname === me) return 1;
-      return a.nickname.localeCompare(b.nickname);
-    });
-    const label = `線上 ${sorted.length} 人`;
-    membersCount.textContent = label;
-    onlineButton.querySelector('.online-label')!.textContent = label;
-    membersList.replaceChildren(
-      ...sorted.map((member) =>
-        h(
-          'li',
-          { class: member.nickname === me ? 'member me' : 'member' },
-          h('span', { class: 'dot' }),
-          member.nickname,
-          member.nickname === me && h('span', { class: 'tag' }, '你'),
-        ),
-      ),
-    );
+  // ---- 搜尋：只過濾「已載入」的訊息 ----
+  function setSearchOpen(open: boolean) {
+    searchbar.hidden = !open;
+    searchToggle.setAttribute('aria-expanded', String(open));
+    if (open) searchInput.focus();
+    else searchInput.value = '';
+    applySearch();
   }
-
-  // ---- 訊息列表（以 key 對應元素，只更新有變的部分，避免圖片重新載入） ----
-  const elements = new Map<string, HTMLElement>();
-
-  function createMessage(item: Extract<Item, { kind: 'msg' }>): HTMLElement {
-    const { msg } = item;
-    const mine = msg.nickname === me;
-    const { text, urls } = parseBody(msg.body);
-    const bubbleChildren: (Node | string)[] = [];
-    if (text) bubbleChildren.push(h('div', { class: 'text' }, text));
-    for (const url of urls) {
-      const img = h('img', {
-        class: 'chat-img',
-        src: url,
-        alt: '使用者貼的圖片',
-        loading: 'lazy',
-        referrerpolicy: 'no-referrer',
-      });
-      img.addEventListener('load', () => {
-        if (keepBottom) scrollToBottom();
-      });
-      img.addEventListener('error', () => {
-        // 載入失敗：退回顯示網址文字
-        img.replaceWith(h('div', { class: 'text url' }, url));
-      });
-      bubbleChildren.push(img);
+  function applySearch() {
+    const query = searchInput.value.trim().toLowerCase();
+    let found = 0;
+    for (const item of state.items) {
+      const el = elements.get(item.key);
+      if (!el) continue;
+      if (!query) {
+        el.hidden = false;
+      } else if (item.kind === 'msg') {
+        const match = item.msg.deletedAt === null && `${item.msg.nickname} ${item.msg.body}`.toLowerCase().includes(query);
+        el.hidden = !match;
+        if (match) found += 1;
+      } else {
+        el.hidden = true;
+      }
     }
-    return h(
-      'div',
-      { class: `msg ${mine ? 'mine' : 'other'}` },
-      h('div', { class: 'meta' }),
-      h('div', { class: 'bubble' }, ...bubbleChildren),
-      h('div', { class: 'status' }),
-    );
+    searchInfo.textContent = query ? `在已載入的訊息中找到 ${found} 則` : '';
+    searchMore.hidden = !(query && state.hasMore);
   }
+  searchToggle.addEventListener('click', () => setSearchOpen(Boolean(searchbar.hidden)));
+  searchInput.addEventListener('input', applySearch);
 
-  function updateMessage(el: HTMLElement, msg: Message) {
-    const mine = msg.nickname === me;
-    const time = formatTime(msg.createdAt);
-    el.querySelector('.meta')!.textContent = mine ? time : `${msg.nickname} · ${time}`;
-    el.classList.toggle('sending', msg.sendState === 'sending');
-    el.classList.toggle('failed', msg.sendState === 'failed');
-    const status = el.querySelector('.status')!;
-    if (msg.sendState === 'sending') {
-      status.replaceChildren('傳送中…');
-    } else if (msg.sendState === 'failed') {
-      status.replaceChildren(
-        h(
-          'button',
-          { class: 'retry', type: 'button', onClick: () => void store.retry(msg.clientMsgId) },
-          icon('retry', 14),
-          '未送出，點一下重送',
-        ),
-      );
-    } else {
-      status.replaceChildren();
-    }
-  }
-
-  function createNotice(item: Extract<Item, { kind: 'notice' }>): HTMLElement {
-    const verb = item.type === 'join' ? '加入了聊天室' : '離開了聊天室';
-    return h('div', { class: 'notice' }, `${item.nickname} ${verb}`);
-  }
-
-  function syncList() {
+  // ---- 訊息列表（以 key 對應元素，只更新有變的部分，避免圖片重新載入）----
+  function syncList(refreshAll: boolean) {
     const live = new Set<string>();
     let previous: Node | null = null;
-    for (const item of store.state.items) {
+    for (const item of state.items) {
       live.add(item.key);
       let el = elements.get(item.key);
       if (!el) {
-        el = item.kind === 'msg' ? createMessage(item) : createNotice(item);
+        el =
+          item.kind === 'msg'
+            ? createMessageEl(item.msg, env)
+            : h('div', { class: 'notice' }, `${item.nickname} ${item.type === 'join' ? '加入了聊天室' : '離開了聊天室'}`);
         elements.set(item.key, el);
+      } else if (item.kind === 'msg' && refreshAll) {
+        updateMessageEl(el, item.msg, env);
       }
-      if (item.kind === 'msg') updateMessage(el, item.msg);
       const expected: ChildNode | null = previous ? previous.nextSibling : list.firstChild;
       if (el !== expected) list.insertBefore(el, expected);
       previous = el;
@@ -226,12 +238,14 @@ export function mountChat(root: HTMLElement, store: ChatStore) {
   }
 
   function renderTopStatus() {
-    const { loadingOlder, hasMore } = store.state;
-    if (loadingOlder) {
+    if (state.loadingConv) {
+      topStatus.replaceChildren(icon('spinner', 14, 'spin'), '載入中…');
+      topStatus.hidden = false;
+    } else if (state.loadingOlder) {
       topStatus.replaceChildren(icon('spinner', 14, 'spin'), '載入更早的訊息…');
       topStatus.hidden = false;
-    } else if (!hasMore) {
-      topStatus.replaceChildren('已經是最早的訊息');
+    } else if (!state.hasMore) {
+      topStatus.replaceChildren(state.items.some((i) => i.kind === 'msg') ? '已經是最早的訊息' : '還沒有訊息，來說第一句話吧');
       topStatus.hidden = false;
     } else {
       topStatus.replaceChildren();
@@ -255,33 +269,15 @@ export function mountChat(root: HTMLElement, store: ChatStore) {
   });
   newMsgButton.addEventListener('click', scrollToBottom);
 
-  // ---- 輸入區 ----
-  function updateComposer() {
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
-    const length = bodyLength(textarea.value.trim());
-    const remaining = MAX_BODY - length;
-    const over = remaining < 0;
-    sendButton.disabled = length === 0 || over;
-    if (over) {
-      counter.textContent = `超過上限 ${-remaining} 字，請刪減`;
-      counter.hidden = false;
-    } else if (remaining <= COUNTER_FROM) {
-      counter.textContent = `還能輸入 ${remaining} 字`;
-      counter.hidden = false;
-    } else {
-      counter.hidden = true;
-    }
-  }
-  textarea.addEventListener('input', updateComposer);
-  composer.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (sendButton.disabled) return;
-    const body = textarea.value;
-    textarea.value = '';
-    updateComposer();
-    void store.send(body);
-    textarea.focus();
+  // ---- 提示（toast）----
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  store.onToast((text) => {
+    toastEl.textContent = text;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toastEl.hidden = true;
+    }, TOAST_MS);
   });
 
   // ---- 狀態變動 ----
@@ -289,13 +285,27 @@ export function mountChat(root: HTMLElement, store: ChatStore) {
     const wasNearBottom = isNearBottom();
     const heightBefore = scroll.scrollHeight;
 
-    banner.hidden = store.state.status === 'connected';
-    renderMembers();
+    if (hint === 'switch' || hint === 'init') {
+      list.replaceChildren();
+      elements.clear();
+      searchInput.value = '';
+      composer.reset();
+      closePicker();
+    }
+
+    title.textContent = store.titleOf(state.current);
+    banner.hidden = state.status === 'connected';
+    sidebar.render();
+    onlineLabel.textContent = `線上 ${sidebar.onlineCount()} 人`;
+    unreadDot.hidden = sidebar.otherUnread() === 0;
     renderTopStatus();
-    syncList();
+    syncList(hint !== 'other' && hint !== 'append-notice');
+    applySearch();
+    composer.refresh();
 
     switch (hint) {
       case 'init':
+      case 'switch':
       case 'append-own':
         scrollToBottom();
         break;

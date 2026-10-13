@@ -5,7 +5,10 @@ import { mountChat } from './ui/chat';
 import { mountDevPanel } from './ui/dev';
 import { mountEntry } from './ui/entry';
 import { applySavedAccent } from './theme';
+import { applyThemeMode } from './prefs';
+import { startNotifier } from './notifier';
 
+applyThemeMode();
 applySavedAccent();
 
 const NICKNAME_KEY = 'chat.nickname';
@@ -29,6 +32,7 @@ function saveNickname(nickname: string) {
 const root = document.getElementById('app') as HTMLElement;
 const client = createChatClient();
 const store = new ChatStore(client);
+startNotifier(store);
 
 let shown: 'entry' | 'chat' | null = null;
 function render() {

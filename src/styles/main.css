@@ -1,4 +1,5 @@
-/* 顏色以變數定義；跟隨裝置的明亮／深色設定自動切換 */
+/* 顏色以變數定義。預設跟隨裝置的明亮／深色設定；
+   使用者也可以手動指定（<html data-theme="light|dark">）。 */
 :root {
   color-scheme: light dark;
   --bg: #f3f5f6;
@@ -14,10 +15,13 @@
   --ok: #22a06b;
   --warn: #7a4b00;
   --focus: #0f766e;
+  --mention-bg: #fff1b8;
+  --mention-text: #5c3d00;
   --font: 'Noto Sans TC', system-ui, 'PingFang TC', 'Microsoft JhengHei', sans-serif;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
     --bg: #0e1413;
     --surface: #172120;
     --text: #e8f0ee;
@@ -27,7 +31,26 @@
     --danger: #ff8a80;
     --sys: #1a2523;
     --focus: #5eead4;
+    --mention-bg: #5a4500;
+    --mention-text: #ffe9a8;
   }
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0e1413;
+  --surface: #172120;
+  --text: #e8f0ee;
+  --muted: #9db0ac;
+  --line: #2a3836;
+  --other: #1e2b29;
+  --danger: #ff8a80;
+  --sys: #1a2523;
+  --focus: #5eead4;
+  --mention-bg: #5a4500;
+  --mention-text: #ffe9a8;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {
@@ -78,6 +101,37 @@ button:disabled {
   to {
     transform: rotate(360deg);
   }
+}
+.icon-btn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: none;
+  color: var(--muted);
+}
+.icon-btn:hover {
+  background: var(--sys);
+  color: var(--text);
+}
+.icon-btn.small {
+  width: 36px;
+  height: 36px;
+}
+.link-btn {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  color: var(--mine);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: underline;
 }
 
 /* ---------- 進入畫面 ---------- */
@@ -198,25 +252,31 @@ button:disabled {
 .topbar {
   flex: none;
   height: 60px;
-  padding: 0 16px;
+  padding: 0 8px 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.topbar h1 {
+.conv-title {
   margin: 0;
+  min-width: 0;
   font-size: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar-right {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 .whoami {
   display: none;
+  margin-right: 8px;
   font-size: 14px;
   color: var(--muted);
 }
@@ -224,6 +284,7 @@ button:disabled {
   color: var(--text);
 }
 .online-btn {
+  position: relative;
   height: 44px;
   padding: 0 14px;
   display: flex;
@@ -234,9 +295,20 @@ button:disabled {
   background: var(--bg);
   font-size: 14px;
   font-weight: 500;
+  white-space: nowrap;
 }
 .online-btn[aria-expanded='true'] {
   border-color: var(--mine);
+}
+.unread-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--danger);
+  border: 2px solid var(--bg);
 }
 .banner {
   flex: none;
@@ -251,22 +323,56 @@ button:disabled {
   font-weight: 500;
 }
 
-/* 線上名單：手機是浮層，電腦是固定在左側 */
-.members {
+/* 搜尋列 */
+.searchbar {
+  flex: none;
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  font-size: 16px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+}
+.search-info {
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* 側邊欄：手機是浮層，電腦是固定在左側 */
+.sidebar {
   display: none;
   position: absolute;
   z-index: 20;
   top: 68px;
   left: 12px;
   right: 12px;
+  max-height: calc(100% - 80px);
+  overflow-y: auto;
   padding: 8px;
   flex-direction: column;
+  gap: 8px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 16px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
-.chat.members-open .members {
+.chat.members-open .sidebar {
   display: flex;
 }
 .backdrop {
@@ -279,18 +385,76 @@ button:disabled {
 .chat.members-open .backdrop {
   display: block;
 }
-.members-title {
-  padding: 8px 12px;
+.side-title {
+  margin: 0;
+  padding: 8px 12px 4px;
   font-size: 13px;
   font-weight: 500;
   color: var(--muted);
 }
-.members-list {
+.side-empty {
+  margin: 0;
+  padding: 4px 12px 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.side-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow-y: auto;
-  max-height: 50dvh;
+}
+.conv-item,
+.member-btn {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  text-align: left;
+  font-size: 16px;
+}
+.conv-item:hover,
+.member-btn:hover {
+  background: var(--bg);
+}
+.conv-item[aria-current='true'] {
+  background: var(--sys);
+  font-weight: 700;
+}
+.conv-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.conv-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.badge {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+:root[data-theme='dark'] .badge {
+  color: #1a0b0a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .badge {
+    color: #1a0b0a;
+  }
 }
 .member {
   min-height: 44px;
@@ -302,6 +466,11 @@ button:disabled {
 }
 .member.me {
   font-weight: 700;
+}
+.member-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
 }
 .tag {
   font-size: 12px;
@@ -357,10 +526,25 @@ button:disabled {
   align-self: flex-end;
   align-items: flex-end;
 }
+.msg.flash .bubble {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
 .meta {
   padding: 0 4px;
   font-size: 12px;
   color: var(--muted);
+}
+.nick-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: underline dotted;
+}
+.nick-btn:hover {
+  color: var(--text);
 }
 .bubble {
   display: flex;
@@ -379,6 +563,10 @@ button:disabled {
   border-color: var(--mine);
   color: var(--on-mine);
 }
+.msg.mentions-me .bubble {
+  border-color: var(--mention-text);
+  box-shadow: 0 0 0 2px var(--mention-bg);
+}
 .bubble:empty {
   display: none;
 }
@@ -388,6 +576,51 @@ button:disabled {
 }
 .text.url {
   word-break: break-all;
+}
+.deleted-text {
+  font-style: italic;
+  opacity: 0.75;
+}
+.mention {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--mention-bg);
+  color: var(--mention-text);
+  font-weight: 700;
+}
+.mention.me {
+  outline: 2px solid var(--mention-text);
+}
+.quote {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-left: 3px solid currentColor;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.16);
+  color: inherit;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0.9;
+}
+.quote svg {
+  flex: none;
+  margin-top: 2px;
+}
+.quote-text {
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.img-link {
+  display: block;
 }
 .chat-img {
   display: block;
@@ -425,6 +658,80 @@ button:disabled {
   align-items: center;
   gap: 6px;
 }
+
+/* 表情回應與操作列 */
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.reactions:empty {
+  display: none;
+}
+.msg.mine .reactions {
+  justify-content: flex-end;
+}
+.chip {
+  min-height: 32px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  font-size: 14px;
+}
+.chip[aria-pressed='true'] {
+  border-color: var(--mine);
+  background: var(--sys);
+  font-weight: 700;
+}
+.chip-count {
+  font-size: 12px;
+  color: var(--muted);
+}
+.actions {
+  display: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.msg.selected .actions {
+  display: flex;
+}
+.act {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 18px;
+}
+.act:hover {
+  background: var(--bg);
+}
+.text-act {
+  font-size: 14px;
+  font-weight: 500;
+}
+.act.danger {
+  color: var(--danger);
+}
+.msg.selected .bubble {
+  outline: 2px solid var(--mine);
+  outline-offset: 2px;
+}
+
 .new-msg {
   position: absolute;
   left: 50%;
@@ -444,25 +751,120 @@ button:disabled {
   gap: 6px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
 }
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  z-index: 30;
+  max-width: calc(100% - 32px);
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 14px;
+  text-align: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+/* Emoji 選擇器 */
+.picker-pop {
+  position: absolute;
+  z-index: 25;
+  left: 12px;
+  right: 12px;
+  bottom: 84px;
+  max-width: 360px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.emoji-group h3 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+}
+.emoji-btn {
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 24px;
+}
+.emoji-btn:hover {
+  background: var(--bg);
+}
 
 /* 輸入區 */
 .composer {
   flex: none;
-  padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+  padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+.typing {
+  min-height: 0;
+  padding: 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.typing:empty {
+  display: none;
+}
+.ctx-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ctx-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 2px 12px;
+  border-left: 3px solid var(--mine);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--muted);
+}
+.ctx-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+}
 .composer-row {
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 4px;
 }
-.composer-input {
+.input-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
+}
+.composer-input {
+  display: block;
+  width: 100%;
   height: 44px;
   max-height: 140px;
   resize: none;
@@ -473,10 +875,38 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 22px;
 }
+.mention-list {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  min-width: 160px;
+  max-width: 100%;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.mention-item {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  font-size: 16px;
+}
+.mention-item:hover,
+.mention-item:first-child {
+  background: var(--bg);
+}
 .send {
   flex: none;
-  width: 64px;
+  min-width: 64px;
   height: 44px;
+  padding: 0 14px;
   border: 0;
   border-radius: 22px;
   background: var(--mine);
@@ -499,9 +929,9 @@ button:disabled {
 @media (min-width: 900px) {
   .topbar {
     height: 64px;
-    padding: 0 28px;
+    padding: 0 20px 0 28px;
   }
-  .topbar h1 {
+  .conv-title {
     font-size: 20px;
   }
   .whoami {
@@ -510,31 +940,18 @@ button:disabled {
   .online-btn {
     display: none;
   }
-  .members {
+  .sidebar {
     display: flex;
     position: static;
     flex: none;
     width: 260px;
-    padding: 0;
+    max-height: none;
+    padding: 8px;
     border: 0;
     border-right: 1px solid var(--line);
     border-radius: 0;
     box-shadow: none;
-  }
-  .members-title {
-    height: 64px;
-    padding: 0 20px;
-    display: flex;
-    align-items: center;
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--text);
-    border-bottom: 1px solid var(--line);
-  }
-  .members-list {
-    padding: 8px;
-    max-height: none;
-    flex: 1;
+    background: var(--surface);
   }
   .backdrop,
   .chat.members-open .backdrop {
@@ -544,7 +961,7 @@ button:disabled {
     padding: 24px 28px;
   }
   .composer {
-    padding: 16px 28px calc(20px + env(safe-area-inset-bottom));
+    padding: 12px 28px calc(20px + env(safe-area-inset-bottom));
   }
   .composer-input {
     height: 48px;
@@ -552,62 +969,27 @@ button:disabled {
     border-radius: 24px;
   }
   .send {
-    width: 80px;
+    min-width: 80px;
     height: 48px;
     border-radius: 24px;
     font-size: 16px;
   }
-  .new-msg {
+  .picker-pop {
+    left: 28px;
+    right: auto;
+    bottom: 96px;
+    width: 360px;
+  }
+  .new-msg,
+  .toast {
     bottom: 104px;
+  }
+  .searchbar {
+    padding: 8px 28px;
   }
 }
 
-/* ---------- 階段一的測試工具 ---------- */
-.dev-panel {
-  position: fixed;
-  right: 12px;
-  bottom: 96px;
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-}
-.dev-toggle {
-  height: 36px;
-  padding: 0 14px;
-  border: 1px dashed var(--muted);
-  border-radius: 18px;
-  background: var(--surface);
-  font-size: 13px;
-}
-.dev-menu {
-  width: 220px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-}
-.dev-title {
-  padding: 4px 8px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.dev-action {
-  min-height: 40px;
-  padding: 0 10px;
-  text-align: left;
-  border: 0;
-  border-radius: 8px;
-  background: var(--bg);
-  font-size: 14px;
-}
-
-/* ---------- 自訂主色 ---------- */
+/* ---------- 外觀與通知設定 ---------- */
 .theme {
   position: relative;
 }
@@ -623,23 +1005,32 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--line);
+  padding: 0;
+  border: 1px solid transparent;
   border-radius: 22px;
-  background: var(--surface);
+  background: none;
+  color: var(--muted);
 }
+.theme-fixed .theme-toggle {
+  background: var(--surface);
+  border-color: var(--line);
+}
+.theme-toggle:hover,
 .theme-toggle[aria-expanded='true'] {
-  border-color: var(--mine);
+  background: var(--sys);
+  color: var(--text);
 }
 .theme-panel {
   position: absolute;
   z-index: 40;
   top: calc(100% + 8px);
   right: 0;
-  width: 264px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -647,6 +1038,24 @@ button:disabled {
 }
 .theme-title {
   font-size: 14px;
+  font-weight: 700;
+}
+.seg {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.seg-btn {
+  flex: 1;
+  min-height: 44px;
+  border: 0;
+  background: var(--bg);
+  font-size: 14px;
+}
+.seg-btn[aria-pressed='true'] {
+  background: var(--mine);
+  color: var(--on-mine);
   font-weight: 700;
 }
 .swatches {
@@ -696,9 +1105,66 @@ button:disabled {
   font-size: 14px;
   font-weight: 500;
 }
+.check {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+.check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--mine);
+}
 .theme-note {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--muted);
+}
+
+/* ---------- 階段一的測試工具 ---------- */
+.dev-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 96px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.dev-toggle {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px dashed var(--muted);
+  border-radius: 18px;
+  background: var(--surface);
+  font-size: 13px;
+}
+.dev-menu {
+  width: 220px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.dev-title {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dev-action {
+  min-height: 40px;
+  padding: 0 10px;
+  text-align: left;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 14px;
 }
