@@ -3,6 +3,7 @@ import type { JoinResult } from '../chat/types';
 import { isValidNickname } from '../chat/rules';
 import { h } from './dom';
 import { icon } from './icons';
+import { createThemePicker } from './theme-picker';
 
 interface EntryOptions {
   initialNickname: string;
@@ -73,6 +74,7 @@ export function mountEntry(root: HTMLElement, { initialNickname, onSubmit }: Ent
     h(
       'main',
       { class: 'entry' },
+      createThemePicker('theme-fixed'),
       h(
         'div',
         { class: 'entry-card' },

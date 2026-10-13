@@ -6,7 +6,10 @@ const PATHS = {
   refresh: '<path d="M3 12a9 9 0 0 1 15.5-6.2M21 12a9 9 0 0 1-15.5 6.2M18.5 2v4h-4M5.5 22v-4h4"/>',
   retry: '<path d="M3 12a9 9 0 0 1 15.5-6.2M18.5 2v4h-4"/>',
   arrowDown: '<path d="M12 5v14M6 13l6 6 6-6"/>',
-  spinner: '<path d="M12 3a9 9 0 1 0 9 9"/>',
+  palette:
+    '<path d="M12 3a9 9 0 1 0 0 18 2 2 0 0 0 1.5-3.3 2 2 0 0 1 1.5-3.3H17a4 4 0 0 0 4-4C21 6 17 3 12 3z"/>' +
+    '<circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7" r="1"/>',
+  spinner:'<path d="M12 3a9 9 0 1 0 9 9"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;

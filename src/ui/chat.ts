@@ -4,6 +4,7 @@ import type { Message } from '../chat/types';
 import { MAX_BODY, bodyLength } from '../chat/rules';
 import { h } from './dom';
 import { icon } from './icons';
+import { createThemePicker } from './theme-picker';
 
 const NEAR_BOTTOM_PX = 80;
 const COUNTER_FROM = 100;
@@ -88,8 +89,13 @@ export function mountChat(root: HTMLElement, store: ChatStore) {
       'header',
       { class: 'topbar' },
       h('h1', {}, '匿名聊天室'),
-      h('span', { class: 'whoami' }, '你的代號：', h('strong', {}, me)),
-      onlineButton,
+      h(
+        'div',
+        { class: 'topbar-right' },
+        h('span', { class: 'whoami' }, '你的代號：', h('strong', {}, me)),
+        createThemePicker(),
+        onlineButton,
+      ),
     ),
     banner,
     scroll,

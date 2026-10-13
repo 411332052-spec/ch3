@@ -4,6 +4,9 @@ import { ChatStore } from './chat/store';
 import { mountChat } from './ui/chat';
 import { mountDevPanel } from './ui/dev';
 import { mountEntry } from './ui/entry';
+import { applySavedAccent } from './theme';
+
+applySavedAccent();
 
 const NICKNAME_KEY = 'chat.nickname';
 
