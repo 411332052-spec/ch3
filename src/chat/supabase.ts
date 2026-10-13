@@ -33,7 +33,16 @@ import type {
   UploadResult,
 } from './types';
 
-const CHANNEL_NAME = 'room:main';
+/** 訊息、編輯、表情回應的即時通道 */
+const DB_CHANNEL = 'chat:db';
+/** 線上名單（誰在線上、在哪個聊天室、正在輸入）的通道。和訊息通道分開，
+ *  線上名單偶爾不穩時，不會連累訊息收發，也不會卡住進入聊天室。 */
+const PRESENCE_CHANNEL = 'room:main';
+/** 線上名單最多花這麼久；超過就先進入聊天室，線上名單在背景繼續重試 */
+const PRESENCE_BUDGET_MS = 7_000;
+const PRESENCE_SUBSCRIBE_MS = 3_000;
+const TRACK_TIMEOUT_MS = 3_000;
+const TRACK_ATTEMPTS = 2;
 const BUCKET = 'chat-images';
 /** 等第一次取得線上名單的最長時間 */
 const FIRST_SYNC_TIMEOUT_MS = 3_000;
@@ -113,7 +122,8 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     for (const handler of [...handlers[event]]) handler(payload);
   }
 
-  let channel: RealtimeChannel | null = null;
+  let dbChannel: RealtimeChannel | null = null;
+  let presenceChannel: RealtimeChannel | null = null;
   let self: Member | null = null;
   let joined = false;
   let hiddenAt: number | null = null;
@@ -152,9 +162,11 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
   async function teardown() {
     joined = false;
     self = null;
-    const ch = channel;
-    channel = null;
-    if (ch) {
+    const channels = [dbChannel, presenceChannel];
+    dbChannel = null;
+    presenceChannel = null;
+    for (const ch of channels) {
+      if (!ch) continue;
       try {
         await ch.untrack();
       } catch {
@@ -162,6 +174,29 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
       }
       await supabase.removeChannel(ch);
     }
+  }
+
+  async function waitUntil(check: () => boolean, ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (check()) return true;
+      await delay(100);
+    }
+    return check();
+  }
+
+  /** 登記為在線者。這個通道偶爾會逾時，所以失敗就等它重連後再試，最多試幾次 */
+  async function trackWithRetry(ch: RealtimeChannel, me: Member): Promise<boolean> {
+    for (let attempt = 0; attempt < TRACK_ATTEMPTS; attempt++) {
+      if (presenceChannel !== ch) return false; // 已經離開或換了通道
+      if (!(await waitUntil(() => ch.state === 'joined', PRESENCE_SUBSCRIBE_MS))) continue;
+      try {
+        if ((await ch.track(me, { timeout: TRACK_TIMEOUT_MS })) === 'ok') return true;
+      } catch {
+        // 逾時就再試
+      }
+    }
+    return false;
   }
 
   /** 某個對話的查詢條件：公開聊天室，或「我和某人」之間的私訊 */
@@ -194,7 +229,7 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     if (joined) emit('connection:status', 'offline');
   });
   window.addEventListener('online', () => {
-    if (joined && channel?.state === 'joined') emit('connection:status', 'connected');
+    if (joined && dbChannel?.state === 'joined') emit('connection:status', 'connected');
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
@@ -203,15 +238,16 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     }
     const away = hiddenAt === null ? 0 : Date.now() - hiddenAt;
     hiddenAt = null;
-    if (!joined || !channel || !self || away < BACKGROUND_RESYNC_MS) return;
-    if (channel.state !== 'joined') return; // 連線已經斷了，等函式庫自己重連
+    if (!joined || !dbChannel || !self || away < BACKGROUND_RESYNC_MS) return;
+    if (dbChannel.state !== 'joined') return; // 連線已經斷了，等函式庫自己重連
     // 手機從背景回來可能漏了訊息：走一次「重連」流程，讓畫面補上漏掉的訊息
-    const ch = channel;
+    const pc = presenceChannel;
     const me = self;
     emit('connection:status', 'reconnecting');
-    void ch.track(me).then(() => {
+    if (pc) void trackWithRetry(pc, me);
+    setTimeout(() => {
       if (joined) emit('connection:status', 'connected');
-    });
+    }, 300);
   });
 
   return {
@@ -238,25 +274,78 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
       if (!sessionData.session) {
         const signedIn = await supabase.auth.signInAnonymously();
         if (signedIn.error || !signedIn.data.session) {
-          console.error('匿名登入失敗，請確認 Supabase 已開啟 Anonymous sign-ins：', signedIn.error);
-          return { ok: false, reason: 'auth' };
+          console.error('匿名登入失敗：', signedIn.error);
+          const limited =
+            signedIn.error?.status === 429 || /rate limit/i.test(signedIn.error?.message ?? '');
+          return { ok: false, reason: limited ? 'rate_limited' : 'auth' };
         }
         sessionData = { session: signedIn.data.session };
       }
       myUserId = sessionData.session!.user.id;
 
       const lower = nickname.toLowerCase();
-      const ch = supabase.channel(CHANNEL_NAME, { config: { presence: { key: clientId } } });
-      channel = ch;
+      const me: Member = {
+        nickname,
+        clientId,
+        userId: myUserId,
+        joinedAt: new Date().toISOString(),
+        room: 'lobby',
+        typing: false,
+      };
 
+      // ---- 1. 訊息通道：新訊息、編輯、表情回應 ----
+      const db = supabase.channel(DB_CHANNEL);
+      dbChannel = db;
+      db.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+        if (joined) emit('message:new', toMessage(payload.new as MessageRow));
+      })
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+          if (joined) emit('message:update', toMessage(payload.new as MessageRow));
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'reactions' }, (payload) => {
+          const row = payload.new as ReactionRow;
+          if (joined) emit('reaction:add', { messageId: row.message_id, emoji: row.emoji, userId: row.user_id });
+        })
+        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'reactions' }, (payload) => {
+          const row = payload.old as Partial<ReactionRow>;
+          if (joined && row.message_id !== undefined && row.emoji && row.user_id) {
+            emit('reaction:remove', { messageId: row.message_id, emoji: row.emoji, userId: row.user_id });
+          }
+        });
+
+      let dbEverSubscribed = false;
+      const dbSubscribed = new Promise<boolean>((resolve) => {
+        db.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            if (!dbEverSubscribed) {
+              dbEverSubscribed = true;
+              resolve(true);
+            } else if (joined) {
+              // 斷線後自動重連成功：通知畫面補上漏掉的訊息
+              emit('connection:status', 'connected');
+            }
+          } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+            if (!dbEverSubscribed) resolve(false);
+            else if (joined) emit('connection:status', 'reconnecting');
+          }
+        });
+      });
+      const dbReady = await Promise.race([dbSubscribed, delay(SUBSCRIBE_TIMEOUT_MS).then(() => false)]);
+      if (!dbReady) {
+        await teardown();
+        return { ok: false, reason: 'error' };
+      }
+
+      // ---- 2. 線上名單通道 ----
+      const pc = supabase.channel(PRESENCE_CHANNEL, { config: { presence: { key: clientId } } });
+      presenceChannel = pc;
       let markSynced: () => void = () => {};
       const firstSync = new Promise<void>((resolve) => {
         markSynced = resolve;
       });
-
-      ch.on('presence', { event: 'sync' }, () => {
+      pc.on('presence', { event: 'sync' }, () => {
         markSynced();
-        if (joined) emit('presence:sync', members(ch));
+        if (joined) emit('presence:sync', members(pc));
       })
         // 同一個人更新資料（換聊天室、正在輸入）時，函式庫也會送 join／leave；
         // 只有「這個人原本沒有／之後完全沒有」才是真的加入或離開
@@ -277,111 +366,49 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
           };
           if (currentPresences.length > 0) return;
           for (const meta of leftPresences) emit('presence:leave', { ...meta });
-        })
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'messages' },
-          (payload) => {
-            if (joined) emit('message:new', toMessage(payload.new as MessageRow));
-          },
-        )
-        .on(
-          'postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'messages' },
-          (payload) => {
-            if (joined) emit('message:update', toMessage(payload.new as MessageRow));
-          },
-        )
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'reactions' },
-          (payload) => {
-            const row = payload.new as ReactionRow;
-            if (joined) emit('reaction:add', { messageId: row.message_id, emoji: row.emoji, userId: row.user_id });
-          },
-        )
-        .on(
-          'postgres_changes',
-          { event: 'DELETE', schema: 'public', table: 'reactions' },
-          (payload) => {
-            const row = payload.old as Partial<ReactionRow>;
-            if (joined && row.message_id !== undefined && row.emoji && row.user_id) {
-              emit('reaction:remove', { messageId: row.message_id, emoji: row.emoji, userId: row.user_id });
-            }
-          },
-        );
-
-      let everSubscribed = false;
-      const subscribed = new Promise<boolean>((resolve) => {
-        ch.subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            if (!everSubscribed) {
-              everSubscribed = true;
-              resolve(true);
-            } else if (joined && self) {
-              // 斷線後自動重連成功：重新登記在線，並通知畫面補上漏掉的訊息
-              void ch.track(self);
-              emit('connection:status', 'connected');
-            }
-          } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-            if (!everSubscribed) resolve(false);
-            else if (joined) emit('connection:status', 'reconnecting');
-          }
         });
+      pc.subscribe((status) => {
+        // 連線重新建立後，重新登記自己在線
+        if (status === 'SUBSCRIBED' && self) void pc.track(self).catch(() => {});
       });
 
-      const connected = await Promise.race([
-        subscribed,
-        delay(SUBSCRIBE_TIMEOUT_MS).then(() => false),
-      ]);
-      if (!connected) {
-        await teardown();
-        return { ok: false, reason: 'error' };
-      }
-
-      // 檢查代號有沒有已經被在線的人使用（不分大小寫）
-      await Promise.race([firstSync, delay(FIRST_SYNC_TIMEOUT_MS)]);
-      const taken = members(ch).some(
-        (m) => m.clientId !== clientId && m.nickname.toLowerCase() === lower,
-      );
-      if (taken) {
-        await teardown();
-        return { ok: false, reason: 'taken' };
-      }
-
-      // 登記為在線者
-      const me: Member = {
-        nickname,
-        clientId,
-        userId: myUserId,
-        joinedAt: new Date().toISOString(),
-        room: 'lobby',
-        typing: false,
+      const presencePhase = async (): Promise<'ok' | 'taken' | 'degraded'> => {
+        if (!(await waitUntil(() => pc.state === 'joined', PRESENCE_SUBSCRIBE_MS))) return 'degraded';
+        await Promise.race([firstSync, delay(FIRST_SYNC_TIMEOUT_MS)]);
+        // 檢查代號有沒有已經被在線的人使用（不分大小寫）
+        if (members(pc).some((m) => m.clientId !== clientId && m.nickname.toLowerCase() === lower)) {
+          return 'taken';
+        }
+        if (!(await trackWithRetry(pc, me))) return 'degraded';
+        // 兩人幾乎同時搶同一個代號：等名單同步後，進入時間較晚者退出（時間相同則比 clientId）
+        await delay(SETTLE_MS);
+        const rivals = members(pc)
+          .filter((m) => m.nickname.toLowerCase() === lower)
+          .sort((a, b) =>
+            a.joinedAt === b.joinedAt
+              ? a.clientId.localeCompare(b.clientId)
+              : a.joinedAt.localeCompare(b.joinedAt),
+          );
+        return rivals.length > 0 && rivals[0].clientId !== clientId ? 'taken' : 'ok';
       };
-      const tracked = await ch.track(me);
-      if (tracked !== 'ok') {
-        await teardown();
-        return { ok: false, reason: 'error' };
-      }
-
-      // 兩人幾乎同時搶同一個代號：等名單同步後，進入時間較晚者退出（時間相同則比 clientId）
-      await delay(SETTLE_MS);
-      const rivals = members(ch)
-        .filter((m) => m.nickname.toLowerCase() === lower)
-        .sort((a, b) =>
-          a.joinedAt === b.joinedAt
-            ? a.clientId.localeCompare(b.clientId)
-            : a.joinedAt.localeCompare(b.joinedAt),
-        );
-      if (rivals.length > 0 && rivals[0].clientId !== clientId) {
+      const outcome = await Promise.race([
+        presencePhase(),
+        delay(PRESENCE_BUDGET_MS).then(() => 'degraded' as const),
+      ]);
+      if (outcome === 'taken') {
         await teardown();
         return { ok: false, reason: 'taken' };
       }
 
       self = me;
       joined = true;
+      if (outcome === 'degraded') {
+        // 線上名單暫時連不上：先讓使用者進入，聊天不受影響，名單在背景繼續重試
+        console.warn('線上名單暫時連不上，先進入聊天室，背景繼續重試');
+        void trackWithRetry(pc, me);
+      }
       emit('connection:status', 'connected');
-      emit('presence:sync', members(ch));
+      emit('presence:sync', members(pc));
       return { ok: true };
     },
 
@@ -390,10 +417,10 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     },
 
     setPresence(update) {
-      if (!channel || !self) return;
+      if (!presenceChannel || !self) return;
       if (update.room !== undefined) self.room = update.room;
       if (update.typing !== undefined) self.typing = update.typing;
-      void channel.track(self);
+      void presenceChannel.track(self, { timeout: TRACK_TIMEOUT_MS }).catch(() => {});
     },
 
     async loadRooms(): Promise<Room[]> {

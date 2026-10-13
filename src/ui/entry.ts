@@ -66,6 +66,7 @@ export function mountEntry(root: HTMLElement, { initialNickname, onSubmit }: Ent
         setBusy(false);
         if (result.reason === 'taken') showError('這個代號有人用了，請換一個');
         else if (result.reason === 'invalid') showError('代號只能用英文和數字，最多 12 個字');
+        else if (result.reason === 'rate_limited') showError('短時間內嘗試進入的次數太多，請等幾分鐘再試');
         else if (result.reason === 'auth') showError('無法建立匿名身分，請稍後再試（管理者請確認 Supabase 已開啟匿名登入）');
         else showError('連線失敗，請稍後再試');
         input.focus();

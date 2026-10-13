@@ -67,7 +67,7 @@ export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
 
 export type JoinResult =
   | { ok: true }
-  | { ok: false; reason: 'invalid' | 'taken' | 'auth' | 'error' };
+  | { ok: false; reason: 'invalid' | 'taken' | 'auth' | 'rate_limited' | 'error' };
 
 export type FailReason = 'offline' | 'invalid' | 'rate_limited' | 'error';
 
