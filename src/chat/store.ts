@@ -22,7 +22,9 @@ const BACKFILL_RECHECK = 50;
 
 export type Item =
   | { kind: 'msg'; key: string; msg: Message }
-  | { kind: 'notice'; key: string; type: 'join' | 'leave'; nickname: string };
+  | { kind: 'notice'; key: string; type: 'join' | 'leave'; nickname: string }
+  /** 自己進入聊天室時的歡迎提示：告訴你現在有幾個人在線上 */
+  | { kind: 'notice'; key: string; type: 'welcome'; nickname: string; count: number };
 
 export interface State {
   phase: 'entry' | 'chat';
@@ -209,6 +211,14 @@ export class ChatStore {
       state.current = roomConv(state.room);
       if (state.room !== 'lobby') client.setPresence({ room: state.room });
       await this.load(state.current);
+      const here = state.members.filter((m) => m.room === state.room).length;
+      this.conv(state.current).items.push({
+        kind: 'notice',
+        key: `notice-${++this.noticeSeq}`,
+        type: 'welcome',
+        nickname: state.nickname,
+        count: Math.max(here, 1),
+      });
     } catch (error) {
       console.error(error);
       this.client.leave();

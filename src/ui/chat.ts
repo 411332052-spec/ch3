@@ -1,5 +1,5 @@
 // 聊天室畫面：頂部列、側邊欄（聊天室／私訊／線上名單）、搜尋、訊息列表、輸入區。
-import type { ChangeHint, ChatStore } from '../chat/store';
+import type { ChangeHint, ChatStore, Item } from '../chat/store';
 import type { Message } from '../chat/types';
 import { createComposer } from './composer';
 import { h } from './dom';
@@ -11,6 +11,11 @@ import { createSidebar } from './sidebar';
 
 const NEAR_BOTTOM_PX = 80;
 const TOAST_MS = 3_500;
+
+function noticeText(item: Extract<Item, { kind: 'notice' }>): string {
+  if (item.type === 'welcome') return `你已進入聊天室，目前有 ${item.count} 人在線上`;
+  return `${item.nickname} ${item.type === 'join' ? '加入了聊天室' : '離開了聊天室'}`;
+}
 
 export function mountChat(root: HTMLElement, store: ChatStore) {
   const { state } = store;
@@ -220,7 +225,7 @@ export function mountChat(root: HTMLElement, store: ChatStore) {
         el =
           item.kind === 'msg'
             ? createMessageEl(item.msg, env)
-            : h('div', { class: 'notice' }, `${item.nickname} ${item.type === 'join' ? '加入了聊天室' : '離開了聊天室'}`);
+            : h('div', { class: 'notice' }, noticeText(item));
         elements.set(item.key, el);
       } else if (item.kind === 'msg' && refreshAll) {
         updateMessageEl(el, item.msg, env);
