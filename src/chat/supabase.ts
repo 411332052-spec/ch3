@@ -2,7 +2,7 @@
 //   身分           → Supabase 匿名登入（不用註冊，每個瀏覽器自動取得一個匿名身分）
 //   訊息、回覆、私訊 → 資料表 messages（權限與頻率限制、字詞遮蔽都在資料庫端）
 //   即時收新訊息、編輯、表情回應 → Realtime（Postgres Changes）
-//   誰在線上、正在輸入、在哪個聊天室 → Realtime Presence
+//   誰在線上、正在輸入、在哪個聊天室 → 資料表 online_users（每人一列，定時更新「最後在線時間」）
 //   圖片           → Storage 的 chat-images
 // 只使用公開的專案網址與 anon（publishable）key；金鑰從 config.ts 傳進來。
 import { createClient, type RealtimeChannel } from '@supabase/supabase-js';
@@ -33,21 +33,16 @@ import type {
   UploadResult,
 } from './types';
 
-/** 訊息、編輯、表情回應的即時通道 */
+/** 訊息、編輯、表情回應、線上名單的即時通道 */
 const DB_CHANNEL = 'chat:db';
-/** 線上名單（誰在線上、在哪個聊天室、正在輸入）的通道。和訊息通道分開，
- *  線上名單偶爾不穩時，不會連累訊息收發，也不會卡住進入聊天室。 */
-const PRESENCE_CHANNEL = 'room:main';
-/** 線上名單最多花這麼久；超過就先進入聊天室，線上名單在背景繼續重試 */
-const PRESENCE_BUDGET_MS = 7_000;
-const PRESENCE_SUBSCRIBE_MS = 3_000;
-const TRACK_TIMEOUT_MS = 3_000;
-const TRACK_ATTEMPTS = 2;
+/** 每隔這麼久更新一次自己的「最後在線時間」 */
+const HEARTBEAT_MS = 12_000;
+/** 每隔這麼久向資料庫重新確認一次完整的線上名單，補上即時通知漏掉的變動 */
+const REFRESH_MS = 30_000;
+/** 超過這麼久沒有任何動靜的人，視為已經離線（要比 HEARTBEAT_MS 大很多） */
+const STALE_MS = 45_000;
+const EXPIRY_CHECK_MS = 10_000;
 const BUCKET = 'chat-images';
-/** 等第一次取得線上名單的最長時間 */
-const FIRST_SYNC_TIMEOUT_MS = 3_000;
-/** 登記自己之後，等其他人的名單同步過來，再判斷有沒有人同時搶同一個代號 */
-const SETTLE_MS = 800;
 const SUBSCRIBE_TIMEOUT_MS = 10_000;
 /** 切到背景超過這麼久再回來，就視同一次重連並補訊息 */
 const BACKGROUND_RESYNC_MS = 3_000;
@@ -72,6 +67,15 @@ interface MessageRow {
   edited_at: string | null;
   deleted_at: string | null;
   reactions?: { emoji: string; user_id: string }[];
+}
+
+interface OnlineRow {
+  client_id: string;
+  user_id: string;
+  nickname: string;
+  room: string;
+  typing: boolean;
+  joined_at: string;
 }
 
 interface ReactionRow {
@@ -123,7 +127,12 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
   }
 
   let dbChannel: RealtimeChannel | null = null;
-  let presenceChannel: RealtimeChannel | null = null;
+  /** 目前在線的人；seenAt 是「我最後一次收到他的動靜」的時間（用自己的時鐘，不受時差影響） */
+  const online = new Map<string, { member: Member; seenAt: number }>();
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let expiryTimer: ReturnType<typeof setInterval> | undefined;
+  let accessToken = '';
   let self: Member | null = null;
   let joined = false;
   let hiddenAt: number | null = null;
@@ -153,50 +162,130 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     };
   }
 
-  function members(ch: RealtimeChannel): Member[] {
-    return Object.values(ch.presenceState<Member>())
-      .filter((metas) => metas.length > 0)
-      .map((metas) => ({ ...metas[metas.length - 1] }));
+  function toMember(row: OnlineRow): Member {
+    return {
+      nickname: row.nickname,
+      clientId: row.client_id,
+      userId: row.user_id,
+      joinedAt: row.joined_at,
+      room: row.room,
+      typing: row.typing,
+    };
   }
+
+  function snapshot(): Member[] {
+    return [...online.values()].map((entry) => ({ ...entry.member }));
+  }
+  const emitSync = () => emit('presence:sync', snapshot());
+
+  // ---- 線上名單：資料表 online_users 的變動 ----
+  function onOnlineInsert(row: OnlineRow) {
+    if (!joined) return;
+    const member = toMember(row);
+    const isNew = !online.has(member.clientId);
+    online.set(member.clientId, { member, seenAt: Date.now() });
+    if (isNew && member.clientId !== clientId) emit('presence:join', { ...member });
+    emitSync();
+  }
+
+  function onOnlineUpdate(row: OnlineRow) {
+    if (!joined) return;
+    const existing = online.get(row.client_id);
+    if (!existing) return onOnlineInsert(row);
+    const next = toMember(row);
+    const changed = next.room !== existing.member.room || next.typing !== existing.member.typing;
+    existing.member = next;
+    existing.seenAt = Date.now();
+    if (changed) emitSync();
+  }
+
+  function dropOnline(id: string) {
+    const existing = online.get(id);
+    if (!existing) return;
+    online.delete(id);
+    if (id !== clientId) emit('presence:leave', { ...existing.member });
+    emitSync();
+  }
+
+  /** 向資料庫要「現在真的在線」的完整名單（由資料庫用它自己的時鐘判斷誰已經離線） */
+  async function refreshOnline() {
+    if (!joined) return;
+    const { data, error } = await supabase.rpc('online_now');
+    if (error || !data) return;
+    const rows = data as OnlineRow[];
+    const alive = new Set(rows.map((row) => row.client_id));
+    for (const row of rows) onOnlineUpdate(row);
+    for (const id of [...online.keys()]) {
+      if (id !== clientId && !alive.has(id)) dropOnline(id);
+    }
+  }
+
+  async function heartbeat() {
+    if (!joined || !self) return;
+    const { data, error } = await supabase
+      .from('online_users')
+      .update({ typing: self.typing, room: self.room })
+      .eq('client_id', clientId)
+      .select('client_id');
+    if (error) return;
+    if ((data ?? []).length === 0) {
+      // 自己那一列不見了（例如斷線太久被清掉）：重新登記
+      await supabase.from('online_users').insert({ client_id: clientId, nickname: self.nickname, room: self.room });
+    }
+  }
+
+  function startTimers() {
+    stopTimers();
+    heartbeatTimer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
+    refreshTimer = setInterval(() => void refreshOnline(), REFRESH_MS);
+    expiryTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [id, entry] of [...online]) {
+        if (id !== clientId && now - entry.seenAt > STALE_MS) dropOnline(id);
+      }
+    }, EXPIRY_CHECK_MS);
+  }
+
+  function stopTimers() {
+    clearInterval(heartbeatTimer);
+    clearInterval(refreshTimer);
+    clearInterval(expiryTimer);
+  }
+
+  /** 關掉分頁時用：瀏覽器即將離開，所以要用 keepalive 讓這個請求能在背景送完 */
+  function sendLeaveBeacon() {
+    if (!joined || !accessToken) return;
+    try {
+      void fetch(`${url}/rest/v1/online_users?client_id=eq.${clientId}`, {
+        method: 'DELETE',
+        keepalive: true,
+        headers: { apikey: anonKey, Authorization: `Bearer ${accessToken}` },
+      });
+    } catch {
+      // 送不出去就等 45 秒後被視為離線
+    }
+  }
+
+  supabase.auth.onAuthStateChange((_event, session) => {
+    accessToken = session?.access_token ?? '';
+  });
 
   async function teardown() {
+    const wasJoined = joined;
     joined = false;
-    self = null;
-    const channels = [dbChannel, presenceChannel];
+    stopTimers();
+    online.clear();
+    const channel = dbChannel;
     dbChannel = null;
-    presenceChannel = null;
-    for (const ch of channels) {
-      if (!ch) continue;
+    if (wasJoined || self) {
       try {
-        await ch.untrack();
+        await supabase.from('online_users').delete().eq('client_id', clientId);
       } catch {
-        // 已經斷線就算了
-      }
-      await supabase.removeChannel(ch);
-    }
-  }
-
-  async function waitUntil(check: () => boolean, ms: number): Promise<boolean> {
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      if (check()) return true;
-      await delay(100);
-    }
-    return check();
-  }
-
-  /** 登記為在線者。這個通道偶爾會逾時，所以失敗就等它重連後再試，最多試幾次 */
-  async function trackWithRetry(ch: RealtimeChannel, me: Member): Promise<boolean> {
-    for (let attempt = 0; attempt < TRACK_ATTEMPTS; attempt++) {
-      if (presenceChannel !== ch) return false; // 已經離開或換了通道
-      if (!(await waitUntil(() => ch.state === 'joined', PRESENCE_SUBSCRIBE_MS))) continue;
-      try {
-        if ((await ch.track(me, { timeout: TRACK_TIMEOUT_MS })) === 'ok') return true;
-      } catch {
-        // 逾時就再試
+        // 刪不掉就等 45 秒後被視為離線
       }
     }
-    return false;
+    self = null;
+    if (channel) await supabase.removeChannel(channel);
   }
 
   /** 某個對話的查詢條件：公開聊天室，或「我和某人」之間的私訊 */
@@ -241,10 +330,8 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
     if (!joined || !dbChannel || !self || away < BACKGROUND_RESYNC_MS) return;
     if (dbChannel.state !== 'joined') return; // 連線已經斷了，等函式庫自己重連
     // 手機從背景回來可能漏了訊息：走一次「重連」流程，讓畫面補上漏掉的訊息
-    const pc = presenceChannel;
-    const me = self;
     emit('connection:status', 'reconnecting');
-    if (pc) void trackWithRetry(pc, me);
+    void heartbeat().then(refreshOnline);
     setTimeout(() => {
       if (joined) emit('connection:status', 'connected');
     }, 300);
@@ -283,17 +370,10 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
       }
       myUserId = sessionData.session!.user.id;
 
-      const lower = nickname.toLowerCase();
-      const me: Member = {
-        nickname,
-        clientId,
-        userId: myUserId,
-        joinedAt: new Date().toISOString(),
-        room: 'lobby',
-        typing: false,
-      };
+      myUserId = sessionData.session!.user.id;
+      accessToken = sessionData.session!.access_token;
 
-      // ---- 1. 訊息通道：新訊息、編輯、表情回應 ----
+      // ---- 訊息通道：新訊息、編輯、表情回應、線上名單的變動 ----
       const db = supabase.channel(DB_CHANNEL);
       dbChannel = db;
       db.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
@@ -311,6 +391,16 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
           if (joined && row.message_id !== undefined && row.emoji && row.user_id) {
             emit('reaction:remove', { messageId: row.message_id, emoji: row.emoji, userId: row.user_id });
           }
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'online_users' }, (payload) => {
+          onOnlineInsert(payload.new as OnlineRow);
+        })
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'online_users' }, (payload) => {
+          onOnlineUpdate(payload.new as OnlineRow);
+        })
+        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'online_users' }, (payload) => {
+          const row = payload.old as Partial<OnlineRow>;
+          if (row.client_id) dropOnline(row.client_id);
         });
 
       let dbEverSubscribed = false;
@@ -321,7 +411,8 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
               dbEverSubscribed = true;
               resolve(true);
             } else if (joined) {
-              // 斷線後自動重連成功：通知畫面補上漏掉的訊息
+              // 斷線後自動重連成功：確認自己還在線、更新名單，並通知畫面補上漏掉的訊息
+              void heartbeat().then(refreshOnline);
               emit('connection:status', 'connected');
             }
           } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
@@ -336,91 +427,56 @@ export function createSupabaseClient(url: string, anonKey: string): ChatClient {
         return { ok: false, reason: 'error' };
       }
 
-      // ---- 2. 線上名單通道 ----
-      const pc = supabase.channel(PRESENCE_CHANNEL, { config: { presence: { key: clientId } } });
-      presenceChannel = pc;
-      let markSynced: () => void = () => {};
-      const firstSync = new Promise<void>((resolve) => {
-        markSynced = resolve;
-      });
-      pc.on('presence', { event: 'sync' }, () => {
-        markSynced();
-        if (joined) emit('presence:sync', members(pc));
-      })
-        // 同一個人更新資料（換聊天室、正在輸入）時，函式庫也會送 join／leave；
-        // 只有「這個人原本沒有／之後完全沒有」才是真的加入或離開
-        .on('presence', { event: 'join' }, (payload) => {
-          if (!joined) return;
-          const { currentPresences, newPresences } = payload as unknown as {
-            currentPresences: Member[];
-            newPresences: Member[];
-          };
-          if (currentPresences.length > 0) return;
-          for (const meta of newPresences) emit('presence:join', { ...meta });
-        })
-        .on('presence', { event: 'leave' }, (payload) => {
-          if (!joined) return;
-          const { currentPresences, leftPresences } = payload as unknown as {
-            currentPresences: Member[];
-            leftPresences: Member[];
-          };
-          if (currentPresences.length > 0) return;
-          for (const meta of leftPresences) emit('presence:leave', { ...meta });
-        });
-      pc.subscribe((status) => {
-        // 連線重新建立後，重新登記自己在線
-        if (status === 'SUBSCRIBED' && self) void pc.track(self).catch(() => {});
-      });
-
-      const presencePhase = async (): Promise<'ok' | 'taken' | 'degraded'> => {
-        if (!(await waitUntil(() => pc.state === 'joined', PRESENCE_SUBSCRIBE_MS))) return 'degraded';
-        await Promise.race([firstSync, delay(FIRST_SYNC_TIMEOUT_MS)]);
-        // 檢查代號有沒有已經被在線的人使用（不分大小寫）
-        if (members(pc).some((m) => m.clientId !== clientId && m.nickname.toLowerCase() === lower)) {
-          return 'taken';
-        }
-        if (!(await trackWithRetry(pc, me))) return 'degraded';
-        // 兩人幾乎同時搶同一個代號：等名單同步後，進入時間較晚者退出（時間相同則比 clientId）
-        await delay(SETTLE_MS);
-        const rivals = members(pc)
-          .filter((m) => m.nickname.toLowerCase() === lower)
-          .sort((a, b) =>
-            a.joinedAt === b.joinedAt
-              ? a.clientId.localeCompare(b.clientId)
-              : a.joinedAt.localeCompare(b.joinedAt),
-          );
-        return rivals.length > 0 && rivals[0].clientId !== clientId ? 'taken' : 'ok';
+      // ---- 登記為在線者：代號重複由資料庫一次擋下（不分大小寫）----
+      const me: Member = {
+        nickname,
+        clientId,
+        userId: myUserId,
+        joinedAt: new Date().toISOString(),
+        room: 'lobby',
+        typing: false,
       };
-      const outcome = await Promise.race([
-        presencePhase(),
-        delay(PRESENCE_BUDGET_MS).then(() => 'degraded' as const),
-      ]);
-      if (outcome === 'taken') {
+      let inserted = await supabase
+        .from('online_users')
+        .insert({ client_id: clientId, nickname, room: me.room });
+      if (inserted.error?.code === '23505' && /pkey/.test(inserted.error.message)) {
+        // 上一次嘗試進入時留下的自己那一列：刪掉再登記一次
+        await supabase.from('online_users').delete().eq('client_id', clientId);
+        inserted = await supabase.from('online_users').insert({ client_id: clientId, nickname, room: me.room });
+      }
+      if (inserted.error) {
+        console.warn('登記在線失敗：', inserted.error.message);
         await teardown();
-        return { ok: false, reason: 'taken' };
+        return { ok: false, reason: inserted.error.code === '23505' ? 'taken' : 'error' };
       }
 
       self = me;
       joined = true;
-      if (outcome === 'degraded') {
-        // 線上名單暫時連不上：先讓使用者進入，聊天不受影響，名單在背景繼續重試
-        console.warn('線上名單暫時連不上，先進入聊天室，背景繼續重試');
-        void trackWithRetry(pc, me);
-      }
+      online.set(clientId, { member: { ...me }, seenAt: Date.now() });
+      await refreshOnline();
+      startTimers();
       emit('connection:status', 'connected');
-      emit('presence:sync', members(pc));
+      emitSync();
       return { ok: true };
     },
 
     leave() {
+      sendLeaveBeacon();
       void teardown();
     },
 
     setPresence(update) {
-      if (!presenceChannel || !self) return;
+      if (!self) return;
       if (update.room !== undefined) self.room = update.room;
       if (update.typing !== undefined) self.typing = update.typing;
-      void presenceChannel.track(self, { timeout: TRACK_TIMEOUT_MS }).catch(() => {});
+      const mine = online.get(clientId);
+      if (mine) mine.member = { ...self };
+      emitSync();
+      void supabase
+        .from('online_users')
+        .update({ room: self.room, typing: self.typing })
+        .eq('client_id', clientId)
+        .then(() => undefined);
     },
 
     async loadRooms(): Promise<Room[]> {
